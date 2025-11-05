@@ -218,6 +218,37 @@ st.markdown(f"**Filtered sample size:** {len(filtered):,} (of {len(df):,})")
 
 # ------------ Plot functions (faceted segments & side-by-side) ---------------
 
+def _ensure_all_levels(df, level_col="category", levels=None, extra_cols=None):
+    """Return df with one row per level (missing -> 0)."""
+    levels = levels or []
+    extra_cols = extra_cols or {}
+    base = pd.DataFrame({level_col: levels})
+    out = base.merge(df, on=level_col, how="left")
+    for c, v in extra_cols.items():
+        if c not in out.columns:
+            out[c] = v
+    # fill missing counts/percents with 0
+    for c in ("count", "percent"):
+        if c in out.columns:
+            out[c] = out[c].fillna(0)
+    return out
+
+def _percent_stack_series(s, levels):
+    """Compute counts and percents for a single series with fixed level order."""
+    s = s.dropna()
+    if s.empty:
+        return pd.DataFrame(columns=["category", "count", "percent"])
+    counts = s.value_counts(dropna=False)
+    counts = counts.reindex(levels, fill_value=0)
+    total = counts.sum()
+    if total == 0:
+        return pd.DataFrame(columns=["category", "count", "percent"])
+    return pd.DataFrame({
+        "category": counts.index,
+        "count": counts.values,
+        "percent": (counts.values / total * 100.0)
+    })
+
 def plot_100_stacked_for_item(df_in, short_name_key, full_col):
     """Plot 100% stacked bar for a given item, using full_col for title, short_name for axis."""
     levels = LIKERT_DICT.get(short_name_key, None)
@@ -226,18 +257,25 @@ def plot_100_stacked_for_item(df_in, short_name_key, full_col):
         return
 
     if facet_full:
-        # Faceted segmented bars (one per group)
+        # Build one normalized row per facet, ensure levels exist, normalize per facet
         rows = []
         for gname, gdf in df_in.groupby(facet_full, dropna=False):
-            d = percent_stack_df(gdf[full_col], levels)
-            if not d.empty:
-                d['facet'] = str(gname)
-                rows.append(d)
+            d = _percent_stack_series(gdf[full_col], levels)
+            if d.empty:
+                continue
+            d = _ensure_all_levels(d, levels=levels, extra_cols={"facet": str(gname)})
+            # re-normalize just in case
+            tot = d["count"].sum()
+            d["percent"] = (d["count"] / tot * 100.0) if tot else 0
+            rows.append(d)
+
         if not rows:
             st.info(f"No data for {short_name_key} after filters.")
             return
+
         data = pd.concat(rows, ignore_index=True)
-        facet_order = list(data["facet"].dropna().unique())
+        facet_order = list(pd.Index(data["facet"]).dropna().unique())
+        n_total = df_in[full_col].notna().sum()
 
         fig = px.bar(
             data,
@@ -247,13 +285,10 @@ def plot_100_stacked_for_item(df_in, short_name_key, full_col):
             orientation="h",
             category_orders={"category": levels, "facet": facet_order},
             hover_data=(["count","percent"] if show_counts else ["percent"]),
-            labels={
-                "percent": "%",
-                "facet": facet_by_short,
-                "category": "Response"
-            },
+            labels={"percent": "%", "facet": facet_by_short, "category": "Response"},
         )
-        n_total = df_in[full_col].notna().sum()
+
+        # lock to 100% stacked
         fig.update_layout(
             title=f"{full_col} — segmented by {facet_by_short} (n={n_total})",
             barmode="stack",
@@ -261,25 +296,32 @@ def plot_100_stacked_for_item(df_in, short_name_key, full_col):
             yaxis=dict(title=short_name_key, autorange="reversed", automargin=True),
             legend_title="",
             margin=dict(l=10, r=10, t=60, b=10),
+            bargap=0.0, bargroupgap=0.0
         )
+
+        # clean hover & show percent nicely
+        fig.update_traces(hovertemplate="%{y}<br>%{fullData.name}: %{x:.1f}%<br>count=%{customdata[0]}")
         st.plotly_chart(fig, use_container_width=True)
 
     else:
-        # Single 100% stacked bar (no facet)
-        data = percent_stack_df(df_in[full_col], levels)
+        # Single 100% stacked bar
+        data = _percent_stack_series(df_in[full_col], levels)
         if data.empty:
             st.info(f"No data for {short_name_key} after filters.")
             return
+        data = _ensure_all_levels(data, levels=levels)
+
         fig = px.bar(
             data,
             x="percent",
-            y=[short_name_key]*len(data),
+            y=[short_name_key] * len(data),  # one horizontal bar
             color="category",
             orientation="h",
             category_orders={"category": levels},
             hover_data=(["count","percent"] if show_counts else ["percent"]),
             labels={"percent": "%", "category": "Response"},
         )
+
         fig.update_layout(
             title=f"{full_col} (n={df_in[full_col].notna().sum()})",
             barmode="stack",
@@ -287,8 +329,12 @@ def plot_100_stacked_for_item(df_in, short_name_key, full_col):
             yaxis=dict(title=short_name_key, showticklabels=False),
             legend_title="",
             margin=dict(l=10, r=10, t=60, b=10),
+            bargap=0.0, bargroupgap=0.0
         )
+
+        fig.update_traces(hovertemplate="%{fullData.name}: %{x:.1f}%<br>count=%{customdata[0]}")
         st.plotly_chart(fig, use_container_width=True)
+
 
 
 
@@ -702,3 +748,4 @@ else:
 #         plot_box_for_item(filtered, col)
 
 # st.caption("Tip: Use the sidebar to filter respondents and to facet by a demographic/control.")
+
